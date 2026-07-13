@@ -61,3 +61,97 @@
 # {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
 # {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
 #
+
+"""Entrena y evalúa un modelo de predicción de precios de vehículos usados."""
+
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, PolynomialFeatures
+
+INPUT_DIR = "files/input"
+MODEL_PATH = "files/models/model.pkl.gz"
+METRICS_PATH = "files/output/metrics.json"
+TARGET = "Present_Price"
+
+
+def prepare_data(data: pd.DataFrame) -> pd.DataFrame:
+    """Crea las variables requeridas por el modelo y elimina las no usadas."""
+    prepared = data.copy()
+    prepared["Age"] = 2021 - prepared["Year"]
+    return prepared.drop(columns=["Year", "Car_Name"])
+
+
+def split_features_target(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """Separa la variable objetivo de los predictores."""
+    return data.drop(columns=[TARGET]), data[TARGET]
+
+
+def build_model() -> GridSearchCV:
+    """Construye la búsqueda con preprocesamiento, selección y regresión."""
+    categorical_features = ["Fuel_Type", "Selling_type", "Transmission"]
+    numerical_features = ["Selling_Price", "Driven_kms", "Owner", "Age"]
+    preprocessor = ColumnTransformer([
+        ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+        ("numerical", MinMaxScaler(), numerical_features),
+    ])
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("polynomial_features", PolynomialFeatures(degree=3, include_bias=False)),
+        ("select_k_best", SelectKBest(score_func=f_regression)),
+        ("linear_regression", LinearRegression()),
+    ])
+    return GridSearchCV(
+        estimator=pipeline,
+        param_grid={"select_k_best__k": range(1, 21)},
+        cv=10,
+        scoring="neg_mean_squared_error",
+        n_jobs=-1,
+    )
+
+
+def metric_record(dataset: str, y_true: pd.Series, y_pred: object) -> dict[str, object]:
+    """Devuelve las métricas solicitadas para un conjunto de datos."""
+    return {
+        "type": "metrics",
+        "dataset": dataset,
+        "r2": r2_score(y_true, y_pred),
+        "mse": mean_squared_error(y_true, y_pred),
+        "mad": mean_absolute_error(y_true, y_pred),
+    }
+
+
+def main() -> None:
+    """Ejecuta entrenamiento, persistencia y evaluación."""
+    train = prepare_data(pd.read_csv(f"{INPUT_DIR}/train_data.csv.zip"))
+    test = prepare_data(pd.read_csv(f"{INPUT_DIR}/test_data.csv.zip"))
+    x_train, y_train = split_features_target(train)
+    x_test, y_test = split_features_target(test)
+    model = build_model()
+    model.fit(x_train, y_train)
+
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    with gzip.open(MODEL_PATH, "wb") as file:
+        pickle.dump(model, file)
+
+    metrics = [
+        metric_record("train", y_train, model.predict(x_train)),
+        metric_record("test", y_test, model.predict(x_test)),
+    ]
+    os.makedirs(os.path.dirname(METRICS_PATH), exist_ok=True)
+    with open(METRICS_PATH, "w", encoding="utf-8") as file:
+        for record in metrics:
+            file.write(json.dumps(record) + "\n")
+
+
+if __name__ == "__main__":
+    main()
